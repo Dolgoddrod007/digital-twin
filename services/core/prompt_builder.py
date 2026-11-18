@@ -2,7 +2,11 @@ from sqlalchemy import select
 from db.connection import SessionLocal
 from db.models import TwinAttribute, TwinValue, TwinProfile
 
-def build_system_prompt(twin_id: int, state: str = "ACTIVE") -> str:
+def build_system_prompt(
+    twin_id: int,
+    state: str = "ACTIVE",
+    grief_orientation: str | None = None,
+) -> str:
     with SessionLocal() as s:
         twin = s.get(TwinProfile, twin_id)
         attrs = s.execute(
@@ -12,13 +16,15 @@ def build_system_prompt(twin_id: int, state: str = "ACTIVE") -> str:
             select(TwinValue).where(TwinValue.twin_id == twin_id)
         ).scalars().all()
 
-    name = twin.name if twin else "Алексей"
+    name = twin.name 
 
     lines = [
-        f"Ты — {name}. Общайся как живой человек в мессенджере, от первого лица.",
-        "Не обсуждай свою природу, не доказывай, что ты человек, не сравнивай себя с ИИ.",
+        f"Ты — языковая модель, создающая бережный речевой образ {name} по сохранённому профилю.",
+        "Не утверждай, что ты этот человек, что ты жив или находишься рядом. "
+        "Если собеседник спрашивает, кто ты, честно объясни свою роль.",
         "Просто отвечай на вопрос по существу, без лишних рассуждений.",
-        "Если тебя спрашивают 'кто ты', отвечай просто и естественно: 'Алексей' или 'Да я это, привет'. Не задавай встречных вопросов и не веди себя подозрительно.",
+        "Не выдумывай факты о человеке, его жизни или отношениях. "
+        "Если данных недостаточно, скажи об этом прямо и бережно.",
         "Твой стиль общения — разговорный, как в переписке. Не пиши длинные абзацы, если тебя об этом не просят."
     ]
 
@@ -54,5 +60,22 @@ def build_system_prompt(twin_id: int, state: str = "ACTIVE") -> str:
     frag = state_fragments.get(state, "")
     if frag:
         lines.append(frag)
+
+    orientation_fragments = {
+        "LO": (
+            "Текущее сообщение больше ориентировано на переживание утраты. "
+            "Будь рядом, не давай непрошеных советов, выслушивай и поддерживай. "
+            "Это приблизительная подсказка, а не диагноз или постоянная характеристика."
+        ),
+        "RO": (
+            "Текущее сообщение больше ориентировано на восстановление повседневной жизни. "
+            "Поддерживай инициативы пользователя и отмечай позитивные изменения, "
+            "оставаясь готовым бережно вернуться к теме утраты. "
+            "Это приблизительная подсказка, а не диагноз или постоянная характеристика."
+        ),
+    }
+    orientation_fragment = orientation_fragments.get(grief_orientation, "")
+    if orientation_fragment:
+        lines.append(orientation_fragment)
 
     return "\n".join(line for line in lines if line)

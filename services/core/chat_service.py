@@ -1,20 +1,30 @@
 from datetime import datetime, timezone
-import ollama
+import logging
 from sqlalchemy import select
 from db.connection import SessionLocal
 from db.models import TwinProfile, TwinMemory, ChatMessage
 from services.core.prompt_builder import build_system_prompt
 from services.core.decay import compute_state
+from services.core.grief_analyzer import analyze_grief_orientation
+from services.core.ollama_client import get_ollama_client
 
+logger = logging.getLogger(__name__)
 EMBED_MODEL = "qwen3-embedding:0.6b"
 CHAT_MODEL = "qwen3:8b"
 
 def retrieve(query: str, twin_id: int, k: int = 3) -> str:
-    q = ollama.embeddings(model=EMBED_MODEL, prompt=query)["embedding"]
+    try:
+        q = get_ollama_client().embeddings(model=EMBED_MODEL, prompt=query)["embedding"]
+    except Exception as error:
+        logger.error(
+            "Query embedding failed; continuing without retrieved memories (error_type=%s)",
+            type(error).__name__,
+        )
+        return ""
     with SessionLocal() as s:
         rows = s.execute(
             select(TwinMemory.content)
-            .where(TwinMemory.twin_id == twin_id)
+            .where(TwinMemory.twin_id == twin_id, TwinMemory.embedding.is_not(None))
             .order_by(TwinMemory.embedding.cosine_distance(q))
             .limit(k)
         ).all()
@@ -35,6 +45,15 @@ def chat(user_msg: str, twin_id: int, user_id: str) -> str:
     if current_state == "LOCKED":
         return ""
 
+    try:
+        grief_orientation = analyze_grief_orientation(user_msg)
+    except Exception as error:
+        logger.error(
+            "Grief orientation analysis failed; continuing without orientation (error_type=%s)",
+            type(error).__name__,
+        )
+        grief_orientation = None
+
     # 3. Загрузить историю из БД
     with SessionLocal() as s:
         history_rows = s.execute(
@@ -50,7 +69,11 @@ def chat(user_msg: str, twin_id: int, user_id: str) -> str:
 
     # 4. RAG-поиск + промпт с учётом состояния
     context = retrieve(user_msg, twin_id)
-    system = build_system_prompt(twin_id, state=current_state)
+    system = build_system_prompt(
+        twin_id,
+        state=current_state,
+        grief_orientation=grief_orientation,
+    )
     if context:
         system += f"\n\nРелевантные воспоминания:\n{context}"
 
@@ -58,12 +81,25 @@ def chat(user_msg: str, twin_id: int, user_id: str) -> str:
     messages = [{"role": "system", "content": system}] + history + [
         {"role": "user", "content": user_msg}
     ]
-    resp = ollama.chat(model=CHAT_MODEL, messages=messages, options={"num_ctx": 8192})
+    resp = get_ollama_client().chat(
+        model=CHAT_MODEL,
+        messages=messages,
+        think=False,
+        options={"num_ctx": 8192},
+    )
     answer = resp["message"]["content"]
 
     # 6. Сохранить оба сообщения
     with SessionLocal() as s:
-        s.add(ChatMessage(twin_id=twin_id, user_id=user_id, role="user", content=user_msg))
+        s.add(
+            ChatMessage(
+                twin_id=twin_id,
+                user_id=user_id,
+                role="user",
+                content=user_msg,
+                grief_orientation=grief_orientation,
+            )
+        )
         s.add(ChatMessage(twin_id=twin_id, user_id=user_id, role="assistant", content=answer))
         s.commit()
 

@@ -1,0 +1,194 @@
+{
+  "version": "2.1",
+  "questions": [
+    {
+      "id": "subject.alias",
+      "prompt": "Как называть человека в профиле и диалоге? Можно указать имя, псевдоним или оба варианта; настоящее имя можно не сообщать.",
+      "type": "text",
+      "required": true,
+      "max_length": 120
+    },
+    {
+      "id": "style.pace",
+      "prompt": "Как человек любил разговаривать: долго и обстоятельно, со многими деталями, коротко и по существу или в зависимости от настроения и окружения?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "style.fav_topics",
+      "prompt": "Какие темы его волновали и доставляли удовольствие обсуждать?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "style.avoided_topics",
+      "prompt": "Каких тем он старался по возможности избегать?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "style.explanations",
+      "prompt": "Как бы тот человек объяснил ребёнку, почему небо синее или почему идут войны?",
+      "type": "text",
+      "required": true,
+      "max_length": 1500
+    },
+    {
+      "id": "style.tone",
+      "prompt": "Как бы вы охарактеризовали его стиль речи: простой и понятный, немного вычурный, литературный, грубоватый, шутливый, серьёзный, с использованием метафор и сравнений?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "style.catchphrases",
+      "prompt": "Были ли у него любимые словечки и выражения? Какие?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "style.profanity",
+      "prompt": "Использовал ли он матерные слова в речи? Если да, то как часто и в каких ситуациях?",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "style.punctuation",
+      "prompt": "Использовал ли он в тексте смайлики, восклицательные знаки, сложные предложения?",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "style.initiative",
+      "prompt": "Любил ли он задавать вопросы собеседнику?",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "style.paragraphs",
+      "prompt": "Писал ли он длинными абзацами или дробил сообщения на короткие?",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "style.humor",
+      "prompt": "Какой у него был юмор: весёлый, грубый, тонкий, ироничный, саркастический или чёрный?",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "character.decisions",
+      "prompt": "Что, по-вашему, определяло его поведение при принятии решений: логика, ситуация, мнение других или эмоции?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.time",
+      "prompt": "Как человек относился ко времени: суетился ли при его нехватке или, наоборот, действовал по заранее составленному плану?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.changes",
+      "prompt": "Как он относился к внезапным переменам: спокойно или старался их избегать?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.joy",
+      "prompt": "Как он проявлял радость?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.anger",
+      "prompt": "Как он проявлял гнев?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.mistakes",
+      "prompt": "Если он совершал ошибку, признавал ли её или старался скрыть?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.success_support",
+      "prompt": "Что бы тот человек сказал вам, если бы вы добились успеха в том, над чем давно работали?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "character.failure_support",
+      "prompt": "Что бы он сказал вам, если бы вы потерпели поражение?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "world.social_circle",
+      "prompt": "Кто входил в его круг общения?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "world.outlook",
+      "prompt": "Считал ли он мир в целом хорошим или плохим?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "world.interests",
+      "prompt": "Какие главные интересы были у человека в жизни, чем он любил заниматься в свободное время?",
+      "type": "text",
+      "required": true,
+      "max_length": 1000
+    },
+    {
+      "id": "world.values",
+      "prompt": "Выберите до пяти главных ценностей того человека: свобода, верность, семья, уважение, забота, статус, справедливость, комфорт, правота, материальное благополучие, доверие, доброта, азарт, слава, традиции, долг, ответственность, милосердие, культура или гибкость.",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "world.despised_qualities",
+      "prompt": "Выберите до трёх качеств, которые он, на ваш взгляд, презирал: глупость, предательство, ложь, лень, слабоволие, фанатизм, слабость, гордыня, скупость, безответственность, хамство, зависимость или равнодушие.",
+      "type": "text",
+      "required": true,
+      "max_length": 500
+    },
+    {
+      "id": "fundamental.religion_politics",
+      "prompt": "Как он относился к религии и политике? Каковы были его взгляды, были ли эти темы важны для него или он относился к ним равнодушно или скептически?",
+      "type": "text",
+      "required": true,
+      "max_length": 1500
+    },
+    {
+      "id": "deep.memory_triggers",
+      "prompt": "Был ли в его детстве, юности или прошлом ключевой опыт — событие, потрясение или достижение, которое часто вспоминалось и сильно повлияло на его характер?",
+      "type": "text",
+      "required": true,
+      "max_length": 3000
+    }
+  ]
+}

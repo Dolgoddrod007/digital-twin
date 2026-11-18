@@ -50,4 +50,21 @@ class ChatMessage(Base):
     user_id = Column(Text, nullable=False)   # ID пользователя в мессенджере (VK/MAX)
     role = Column(Text, nullable=False)      # 'user' / 'assistant'
     content = Column(Text, nullable=False)
+    grief_orientation = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClientOnboarding(Base):
+    __tablename__ = "client_onboarding"
+    user_id = Column(Text, primary_key=True)
+    channel = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="new")
+    step_index = Column(Integer, nullable=False, default=0)
+    answers_json = Column(Text, nullable=False, default="{}")
+    conversation_text = Column("docx_content", Text)
+    conversation_approved = Column("docx_approved", Integer, nullable=False, default=0)
+    previous_status = Column(Text)
+    consent_version = Column(Text)
+    consent_signed_at = Column(DateTime(timezone=True))
+    twin_id = Column(Integer, ForeignKey("twin_profiles.id", ondelete="SET NULL"))
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
