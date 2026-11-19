@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Column, Float, Integer, Text, DateTime, ForeignKey, func
 from sqlalchemy.orm import declarative_base
 from pgvector.sqlalchemy import Vector
 
@@ -13,7 +13,8 @@ class TwinProfile(Base):
 
     # новые поля расписания угасания
     current_state = Column(Text, default="SETUP")        # SETUP/ACTIVE/FADING/FAREWELL/LOCKED
-    schedule_position = Column(Integer, default=0)       # s — позиция в расписании
+    schedule_position = Column(Float, default=0.0)       # s — прошедшие дни тестового расписания
+    availability_effective = Column(Float, nullable=False, default=1.0, server_default="1.0")
     activated_at = Column(DateTime(timezone=True))       # когда перешёл в ACTIVE
     last_interaction_at = Column(DateTime(timezone=True)) # последнее сообщение пользователя
 
@@ -51,6 +52,9 @@ class ChatMessage(Base):
     role = Column(Text, nullable=False)      # 'user' / 'assistant'
     content = Column(Text, nullable=False)
     grief_orientation = Column(Text)
+    crisis_signal = Column(Boolean)
+    crisis_score = Column(Integer, nullable=False, default=0, server_default="0")
+    crisis_escalated = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
