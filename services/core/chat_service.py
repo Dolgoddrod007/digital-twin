@@ -89,10 +89,15 @@ def chat(user_msg: str, twin_id: int, user_id: str) -> str:
                 .order_by(ChatMessage.created_at.desc())
                 .limit(20)
             ).scalars().all()
-        history = [
-            {"role": r.role, "content": r.content}
-            for r in reversed(history_rows)
-        ]
+        history = []
+        seen_assistant_replies: set[str] = set()
+        for row in reversed(history_rows):
+            if row.role == "assistant":
+                normalized_reply = " ".join(row.content.casefold().split())
+                if normalized_reply in seen_assistant_replies:
+                    continue
+                seen_assistant_replies.add(normalized_reply)
+            history.append({"role": row.role, "content": row.content})
 
     with SessionLocal() as s:
         s.add(
@@ -131,7 +136,7 @@ def chat(user_msg: str, twin_id: int, user_id: str) -> str:
             model=CHAT_MODEL,
             messages=messages,
             think=False,
-            options={"num_ctx": 8192},
+            options={"num_ctx": 8192, "repeat_penalty": 1.15},
         )
         answer = resp["message"]["content"]
 
