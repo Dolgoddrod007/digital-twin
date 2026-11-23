@@ -5,12 +5,12 @@ from db.connection import SessionLocal
 from db.models import TwinProfile, ChatMessage
 
 TEST_LOCK_AFTER = timedelta(days=7)
-TEST_FAREWELL_AFTER = timedelta(days=6)
-TEST_FADING_RO_AFTER = timedelta(days=3)
-TEST_FADING_LO_AFTER = timedelta(days=5)
 AVAILABILITY_WINDOW = timedelta(days=3)
 ALPHA = 0.3
 BETA = 0.2
+ACTIVE_AVAILABILITY_THRESHOLD = 0.7
+ACTIVE_RECOVERY_THRESHOLD = 0.75
+FAREWELL_AVAILABILITY_THRESHOLD = 0.35
 
 
 def _update_effective_availability(
@@ -40,7 +40,11 @@ def _update_effective_availability(
         .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
     ).scalars().all()
 
-    lo_weight = orientations.count("LO") / len(orientations) if orientations else 0.0
+    lo_weight = (
+        orientations.count("LO") / len(orientations)
+        if len(orientations) >= 3
+        else 0.5
+    )
     transitions = sum(
         previous != current
         for previous, current in zip(orientations, orientations[1:])
@@ -51,21 +55,32 @@ def _update_effective_availability(
         * (1.0 - ALPHA * lo_weight)
         * (1.0 - BETA * oscillation)
     )
-    previous_availability = twin.availability_effective
-    if previous_availability is None:
-        previous_availability = 1.0
-
-    effective_availability = min(
-        max(0.0, min(1.0, previous_availability)),
-        max(0.0, min(1.0, current_availability)),
-    )
+    effective_availability = max(0.0, min(1.0, current_availability))
     twin.schedule_position = schedule_position
     twin.availability_effective = effective_availability
     return effective_availability
 
 
+def _state_for_availability(availability: float, previous_state: str | None) -> str:
+    if previous_state == "LOCKED":
+        return "LOCKED"
+    if previous_state == "FAREWELL":
+        return "FAREWELL"
+    if availability < FAREWELL_AVAILABILITY_THRESHOLD:
+        return "FAREWELL"
+    if previous_state == "FADING":
+        return (
+            "ACTIVE"
+            if availability > ACTIVE_RECOVERY_THRESHOLD
+            else "FADING"
+        )
+    if availability <= ACTIVE_AVAILABILITY_THRESHOLD:
+        return "FADING"
+    return "ACTIVE"
+
+
 def compute_state(twin_id: int) -> str:
-    """Вычисляет текущее состояние двойника на основе времени и истории."""
+    """Recalculate availability and state, respecting farewell and lifetime locks."""
     with SessionLocal() as s:
         twin = s.execute(
             select(TwinProfile)
@@ -87,7 +102,7 @@ def compute_state(twin_id: int) -> str:
         if not activated_at:
             return "SETUP"
         active_duration = now - activated_at
-        _update_effective_availability(
+        availability = _update_effective_availability(
             s,
             twin,
             now,
@@ -95,26 +110,11 @@ def compute_state(twin_id: int) -> str:
             active_duration,
         )
 
-        recent_messages = s.execute(
-            select(ChatMessage.created_at, ChatMessage.grief_orientation)
-            .where(ChatMessage.twin_id == twin_id, ChatMessage.role == "user")
-            .order_by(ChatMessage.created_at.desc())
-            .limit(10)
-        ).all()
-        last_msg = recent_messages[0][0] if recent_messages else None
-        silent_duration = now - last_msg if last_msg else active_duration
-        ro_count = sum(row[1] == "RO" for row in recent_messages)
-        lo_count = sum(row[1] == "LO" for row in recent_messages)
-        fading_after = TEST_FADING_RO_AFTER if ro_count > lo_count else TEST_FADING_LO_AFTER
-
         if active_duration >= TEST_LOCK_AFTER:
             state = "LOCKED"
             twin.availability_effective = 0.0
-        elif silent_duration >= TEST_FAREWELL_AFTER:
-            state = "FAREWELL"
-        elif silent_duration >= fading_after:
-            state = "FADING"
         else:
-            state = "ACTIVE"
+            state = _state_for_availability(availability, twin.current_state)
+        twin.current_state = state
         s.commit()
         return state

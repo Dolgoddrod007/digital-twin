@@ -30,7 +30,14 @@ with SessionLocal() as s:
     # Память (с эмбеддингом)
     text = "В юности потерял близкого друга и с тех пор ценит честность."
     vec = ollama.embeddings(model="qwen3-embedding:0.6b", prompt=text)["embedding"]
-    s.add(TwinMemory(twin_id=tid, content=text, embedding=vec))
+    s.add(TwinMemory(
+        twin_id=tid,
+        content=text,
+        embedding=vec,
+        embedding_model="qwen3-embedding:0.6b",
+        source_type="profile_memory",
+        source_author="profile",
+    ))
 
     s.commit()
     print(f"Персонаж создан, id={tid}")

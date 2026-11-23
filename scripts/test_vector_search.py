@@ -1,41 +1,59 @@
+import argparse
+import os
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ollama
-from db.connection import SessionLocal
-from db.models import TwinProfile, TwinMemory
 from sqlalchemy import select
 
-# 0. Убедитесь, что модель эмбеддингов скачана: ollama pull qwen3-embedding:0.6b
-EMBED_MODEL = "qwen3-embedding:0.6b"
+from db.connection import SessionLocal
+from db.models import TwinMemory
+from services.core.ollama_client import get_ollama_client
 
-# 1. Создать тестового двойника
-with SessionLocal() as s:
-    twin = TwinProfile(name="test_twin")
-    s.add(twin)
-    s.commit()
-    s.refresh(twin)
-    twin_id = twin.id
 
-# 2. Создать эмбеддинг
-resp = ollama.embeddings(model=EMBED_MODEL, prompt="Я боюсь остаться один")
-vec = resp["embedding"]
-print(f"Размерность вектора: {len(vec)}")  # должно быть 1024
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Read-only проверка векторного поиска по существующему профилю"
+    )
+    parser.add_argument("--twin-id", required=True, type=int)
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--limit", type=int, default=5)
+    args = parser.parse_args()
 
-# 3. Записать в базу данных
-with SessionLocal() as s:
-    mem = TwinMemory(twin_id=twin_id, content="Я боюсь остаться один", embedding=vec)
-    s.add(mem)
-    s.commit()
+    model = os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b")
+    vector = get_ollama_client().embeddings(
+        model=model,
+        prompt=args.query,
+    )["embedding"]
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(
+                TwinMemory.id,
+                TwinMemory.embedding.cosine_distance(vector).label("distance"),
+                TwinMemory.source_type,
+                TwinMemory.source_author,
+                TwinMemory.source_date,
+            )
+            .where(
+                TwinMemory.twin_id == args.twin_id,
+                TwinMemory.embedding.is_not(None),
+                TwinMemory.embedding_model == model,
+            )
+            .order_by(TwinMemory.embedding.cosine_distance(vector))
+            .limit(max(1, args.limit))
+        ).all()
 
-# 4. Поиск по сходству
-q = ollama.embeddings(model=EMBED_MODEL, prompt="одиночество")["embedding"]
-with SessionLocal() as s:
-    rows = s.execute(
-        select(TwinMemory.content)
-        .where(TwinMemory.twin_id == twin_id)
-        .order_by(TwinMemory.embedding.cosine_distance(q))
-        .limit(1)
-    ).all()
-    print(rows)
+    print(f"Модель: {model}; размерность запроса: {len(vector)}; найдено: {len(rows)}")
+    for row in rows:
+        print(
+            f"id={row.id}; similarity={1.0 - float(row.distance):.3f}; "
+            f"type={row.source_type or 'unknown'}; "
+            f"origin={row.source_author or 'unknown'}; "
+            f"date={row.source_date or 'unknown'}"
+        )
+    print("Тексты воспоминаний не выводились; БД не изменялась.")
+
+
+if __name__ == "__main__":
+    main()

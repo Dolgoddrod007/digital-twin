@@ -2,7 +2,11 @@ import json
 import logging
 import os
 import tempfile
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Generator
 from urllib.parse import urlparse
 
 import requests
@@ -19,10 +23,42 @@ from services.core.onboarding_service import (
     load_conversation_text,
     save_conversation_draft,
 )
+from services.core.outbox_service import (
+    claim_next_delivery,
+    mark_delivery_failed,
+    mark_delivery_sent,
+)
 
 MAX_VK_MESSAGE_LENGTH = 4000
 MAX_PROCESSED_EVENTS = 10_000
 logger = logging.getLogger(__name__)
+
+
+class _PeerLockPool:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._tickets: dict[int, tuple[int, int]] = {}
+
+    @contextmanager
+    def hold(self, peer_id: int) -> Generator[None, None, None]:
+        with self._condition:
+            next_ticket, serving_ticket = self._tickets.get(peer_id, (0, 0))
+            ticket = next_ticket
+            self._tickets[peer_id] = (next_ticket + 1, serving_ticket)
+            self._condition.wait_for(
+                lambda: self._tickets[peer_id][1] == ticket
+            )
+        try:
+            yield
+        finally:
+            with self._condition:
+                next_ticket, serving_ticket = self._tickets[peer_id]
+                serving_ticket += 1
+                if serving_ticket == next_ticket:
+                    del self._tickets[peer_id]
+                else:
+                    self._tickets[peer_id] = (next_ticket, serving_ticket)
+                self._condition.notify_all()
 
 
 def _chunks(text: str, limit: int = MAX_VK_MESSAGE_LENGTH) -> list[str]:
@@ -101,6 +137,9 @@ class VkAdapter:
         self.text_loader = text_loader
         self.text_saver = text_saver
         self.processed_ids: set[tuple[int, int]] = set()
+        self._processed_ids_lock = threading.Lock()
+        self._peer_locks = _PeerLockPool()
+        self._send_lock = threading.Lock()
 
     @staticmethod
     def _keyboard(reply: OnboardingReply) -> str | None:
@@ -127,13 +166,14 @@ class VkAdapter:
     def _send(self, peer_id: int, text: str, reply: OnboardingReply | None = None) -> None:
         chunks = _chunks(text)
         keyboard = self._keyboard(reply) if reply is not None else None
-        for index, chunk in enumerate(chunks):
-            self.api.messages.send(
-                peer_id=peer_id,
-                message=chunk,
-                random_id=get_random_id(),
-                keyboard=keyboard if index == 0 else None,
-            )
+        with self._send_lock:
+            for index, chunk in enumerate(chunks):
+                self.api.messages.send(
+                    peer_id=peer_id,
+                    message=chunk,
+                    random_id=get_random_id(),
+                    keyboard=keyboard if index == 0 else None,
+                )
 
     def _handle_conversation_file(
         self,
@@ -232,12 +272,22 @@ class VkAdapter:
             logger.warning("Skipped VK message with invalid message ID")
             return
         event_id = (peer_id, message_id)
-        if event_id in self.processed_ids:
-            return
-        if len(self.processed_ids) >= MAX_PROCESSED_EVENTS:
-            self.processed_ids.clear()
-        self.processed_ids.add(event_id)
+        with self._processed_ids_lock:
+            if event_id in self.processed_ids:
+                return
+            if len(self.processed_ids) >= MAX_PROCESSED_EVENTS:
+                self.processed_ids.clear()
+            self.processed_ids.add(event_id)
 
+        with self._peer_locks.hold(peer_id):
+            self._handle_peer_message(message, numeric_user_id, peer_id)
+
+    def _handle_peer_message(
+        self,
+        message: dict,
+        numeric_user_id: int,
+        peer_id: int,
+    ) -> None:
         user_id = f"vk:{numeric_user_id}"
         attachments = message.get("attachments") or []
         if attachments and self._handle_conversation_file(user_id, peer_id, attachments):
@@ -267,17 +317,83 @@ class VkAdapter:
                 self._send(peer_id, "Профиль не найден. Чтобы начать заполнение, отправьте /start.")
                 return
 
+            queue_delivery = self.chat_handler is None
             chat_handler = self.chat_handler
-            if chat_handler is None:
+            if queue_delivery:
                 from services.core.chat_service import chat
 
                 chat_handler = chat
-            answer = chat_handler(text, twin_id, user_id)
-            if answer:
+            if queue_delivery:
+                answer = chat_handler(
+                    text,
+                    twin_id,
+                    user_id,
+                    delivery_channel="vk",
+                    delivery_recipient_id=str(peer_id),
+                )
+            else:
+                answer = chat_handler(text, twin_id, user_id)
+            if answer and not queue_delivery:
                 self._send(peer_id, answer)
         except Exception as error:
             logger.error("VK message processing failed (error_type=%s)", type(error).__name__)
             self._send(peer_id, "Не удалось обработать сообщение из-за технической ошибки. Попробуйте позже.")
+
+
+def run_vk_outbox_worker(api, send_lock: threading.Lock, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            delivery = claim_next_delivery("vk")
+        except Exception as error:
+            logger.error("VK outbox claim failed (error_type=%s)", type(error).__name__)
+            stop_event.wait(1)
+            continue
+        if delivery is None:
+            stop_event.wait(1)
+            continue
+
+        try:
+            with send_lock:
+                for chunk in _chunks(delivery.content):
+                    api.messages.send(
+                        peer_id=int(delivery.recipient_id),
+                        message=chunk,
+                        random_id=get_random_id(),
+                    )
+        except Exception as error:
+            logger.error(
+                "VK outbox delivery failed (delivery_id=%s, error_type=%s)",
+                delivery.id,
+                type(error).__name__,
+            )
+            try:
+                will_retry = mark_delivery_failed(delivery.id, type(error).__name__)
+                if not will_retry:
+                    logger.error("VK outbox delivery exhausted retries (delivery_id=%s)", delivery.id)
+            except Exception as update_error:
+                logger.error(
+                    "VK outbox failure update failed (delivery_id=%s, error_type=%s)",
+                    delivery.id,
+                    type(update_error).__name__,
+                )
+        else:
+            try:
+                mark_delivery_sent(delivery.id)
+            except Exception as error:
+                logger.error(
+                    "VK outbox sent-state update failed (delivery_id=%s, error_type=%s)",
+                    delivery.id,
+                    type(error).__name__,
+                )
+
+
+def _log_update_failure(future: Future[None]) -> None:
+    error = future.exception()
+    if error is not None:
+        logger.error(
+            "VK update worker failed (error_type=%s)",
+            type(error).__name__,
+        )
 
 
 def _load_settings() -> tuple[str, int]:
@@ -301,12 +417,26 @@ def main() -> None:
     api = session.get_api()
     adapter = VkAdapter(api)
     longpoll = VkBotLongPoll(session, group_id)
+    stop_event = threading.Event()
+    outbox_thread = threading.Thread(
+        target=run_vk_outbox_worker,
+        args=(api, adapter._send_lock, stop_event),
+        name="vk-outbox",
+        daemon=True,
+    )
 
     logger.info("VK-адаптер запущен")
-    for event in longpoll.listen():
-        if event.type != VkBotEventType.MESSAGE_NEW:
-            continue
-        adapter.handle_message(event.obj.message)
+    outbox_thread.start()
+    try:
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="vk-update") as executor:
+            for event in longpoll.listen():
+                if event.type != VkBotEventType.MESSAGE_NEW:
+                    continue
+                future = executor.submit(adapter.handle_message, event.obj.message)
+                future.add_done_callback(_log_update_failure)
+    finally:
+        stop_event.set()
+        outbox_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

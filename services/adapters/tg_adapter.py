@@ -7,8 +7,14 @@ from pathlib import Path
 import tempfile
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
+from services.core.outbox_service import (
+    claim_next_delivery,
+    mark_delivery_failed,
+    mark_delivery_sent,
+)
 from services.core.onboarding_service import (
     MAX_CONVERSATION_FILE_BYTES,
     OnboardingReply,
@@ -98,8 +104,9 @@ class TelegramAdapter:
             await message.answer("Профиль не найден. Чтобы начать заполнение, отправьте /start.")
             return
 
+        queue_delivery = self.chat_handler is None
         chat_handler = self.chat_handler
-        if chat_handler is None:
+        if queue_delivery:
             from services.core.chat_service import chat
 
             chat_handler = chat
@@ -111,6 +118,15 @@ class TelegramAdapter:
                 message.text,
                 twin_id,
                 user_id,
+                **(
+                    {
+                        "delivery_channel": "telegram",
+                        "delivery_recipient_id": str(message.chat.id),
+                        "telegram_placeholder_message_id": processing_message.message_id,
+                    }
+                    if queue_delivery
+                    else {}
+                ),
             )
         except Exception as error:
             logger.error("Telegram chat failed (error_type=%s)", type(error).__name__)
@@ -121,6 +137,9 @@ class TelegramAdapter:
 
         if not answer:
             await processing_message.delete()
+            return
+
+        if queue_delivery:
             return
 
         chunks = split_message(answer)
@@ -263,14 +282,88 @@ class TelegramAdapter:
         return router
 
 
+async def run_outbox_worker(bot: Bot) -> None:
+    while True:
+        try:
+            delivery = await asyncio.to_thread(claim_next_delivery, "telegram")
+        except Exception as error:
+            logger.error("Telegram outbox claim failed (error_type=%s)", type(error).__name__)
+            await asyncio.sleep(1)
+            continue
+        if delivery is None:
+            await asyncio.sleep(1)
+            continue
+
+        try:
+            chunks = split_message(delivery.content)
+            chat_id = int(delivery.recipient_id)
+            if delivery.telegram_placeholder_message_id is not None:
+                try:
+                    await bot.edit_message_text(
+                        chunks[0],
+                        chat_id=chat_id,
+                        message_id=delivery.telegram_placeholder_message_id,
+                    )
+                except TelegramBadRequest as error:
+                    if "message is not modified" not in str(error).casefold():
+                        logger.warning(
+                            "Telegram placeholder edit failed; sending a new message "
+                            "(error_type=%s)",
+                            type(error).__name__,
+                        )
+                        await bot.send_message(chat_id, chunks[0])
+                for chunk in chunks[1:]:
+                    await bot.send_message(chat_id, chunk)
+            else:
+                for chunk in chunks:
+                    await bot.send_message(chat_id, chunk)
+        except Exception as error:
+            logger.error(
+                "Telegram outbox delivery failed (delivery_id=%s, error_type=%s)",
+                delivery.id,
+                type(error).__name__,
+            )
+            try:
+                will_retry = await asyncio.to_thread(
+                    mark_delivery_failed,
+                    delivery.id,
+                    type(error).__name__,
+                )
+                if not will_retry:
+                    logger.error("Telegram outbox delivery exhausted retries (delivery_id=%s)", delivery.id)
+            except Exception as update_error:
+                logger.error(
+                    "Telegram outbox failure update failed (delivery_id=%s, error_type=%s)",
+                    delivery.id,
+                    type(update_error).__name__,
+                )
+        else:
+            try:
+                await asyncio.to_thread(mark_delivery_sent, delivery.id)
+            except Exception as error:
+                logger.error(
+                    "Telegram outbox sent-state update failed (delivery_id=%s, error_type=%s)",
+                    delivery.id,
+                    type(error).__name__,
+                )
+
+
 async def run_polling(settings: TelegramSettings) -> None:
     bot = Bot(token=settings.token)
     dispatcher = Dispatcher()
     dispatcher.include_router(TelegramAdapter(settings).create_router())
-    await dispatcher.start_polling(
-        bot,
-        allowed_updates=["message", "callback_query"],
-    )
+    outbox_task = asyncio.create_task(run_outbox_worker(bot))
+    try:
+        await dispatcher.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query"],
+        )
+    finally:
+        outbox_task.cancel()
+        try:
+            await outbox_task
+        except asyncio.CancelledError:
+            pass
 
 
 def main() -> None:

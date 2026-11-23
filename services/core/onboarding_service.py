@@ -1,12 +1,11 @@
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
-
-from sqlalchemy import select
 
 from db.connection import SessionLocal
 from db.models import ClientOnboarding, TwinAttribute, TwinMemory, TwinProfile
@@ -17,6 +16,9 @@ CONSENT_VERSION = "messenger-onboarding-2"
 MAX_CONVERSATION_FILE_BYTES = 20 * 1024 * 1024
 MAX_CONVERSATION_CHARACTERS = 200_000
 MAX_MEMORY_CHUNK_CHARACTERS = 800
+MAX_STYLE_EXAMPLES = 5
+MIN_STYLE_EXAMPLE_CHARACTERS = 35
+MAX_STYLE_EXAMPLE_CHARACTERS = 240
 _QUESTIONNAIRE_PATH = Path(__file__).resolve().parents[2] / "config" / "questionnaire.json"
 _QUESTIONNAIRE = json.loads(_QUESTIONNAIRE_PATH.read_text(encoding="utf-8"))
 QUESTIONS = _QUESTIONNAIRE["questions"]
@@ -28,6 +30,13 @@ QUESTION_BLOCKS = (
     (25, 27, "Фундаментальные вопросы"),
 )
 EmbeddingFactory = Callable[[str], list[float]]
+
+
+@dataclass(frozen=True)
+class ConversationChunk:
+    content: str
+    sequence: int
+    total: int
 
 GENERAL_CONSENT_TEXT = (
     "Перед началом: вы общаетесь с программной языковой моделью, созданной по профилю, "
@@ -548,8 +557,8 @@ def _activate_profile(db, user_id: str, onboarding: ClientOnboarding) -> Onboard
 
     onboarding.twin_id = twin_id
     onboarding.status = "active"
-    onboarding.conversation_text = None
-    onboarding.conversation_approved = 0
+    # Keep an approved source text available for explicit reprocessing.
+    # It is not cleared or overwritten during normal profile activation.
     db.commit()
     if embeddings_unavailable:
         return OnboardingReply(
@@ -576,6 +585,174 @@ def _embedding(text: str) -> list[float]:
         model=os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b"),
         prompt=text,
     )["embedding"]
+
+
+def _parse_conversation(text: str) -> list[str]:
+    """Keep authored material intact; blank lines delimit paragraphs, not speakers."""
+    paragraphs = re.split(r"\n\s*\n+", text.strip())
+    return [paragraph.strip() for paragraph in paragraphs if paragraph.strip()]
+
+
+def _is_style_candidate(sentence: str) -> bool:
+    if not MIN_STYLE_EXAMPLE_CHARACTERS <= len(sentence) <= MAX_STYLE_EXAMPLE_CHARACTERS:
+        return False
+    normalized = sentence.casefold()
+    if (
+        "материал предоставлен пользователем" in normalized
+        or "внутренние цитаты и пересказы не подтверждают" in normalized
+        or re.search(r"\bфрагмент\s+\d+\s+из\s+\d+\b", normalized)
+    ):
+        return False
+    if len(sentence.split()) < 7 or re.match(r"^\s*[^:]{1,60}:\s+\S", sentence):
+        return False
+    if any(mark in sentence for mark in ("«", "»", "“", "”", "„", '"')):
+        return False
+    return not re.search(
+        r"\b(?:он|она|они)\s+(?:мне\s+)?"
+        r"(?:сказал(?:а|и)?|ответил(?:а|и)?|спросил(?:а|и)?|"
+        r"рассказал(?:а|и)?|писал(?:а|и)?|говорил(?:а|и)?)\b|"
+        r"\b(?:по его словам|по её словам|цитирую|он мне сказал|она мне сказала)\b",
+        normalized,
+    )
+
+
+def select_style_examples(text: str) -> tuple[str, ...]:
+    candidates: list[tuple[str, int]] = []
+    paragraphs = _parse_conversation(text)
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        if any(
+            re.match(r"^\s*[^:]{1,60}:\s+\S", line)
+            for line in paragraph.splitlines()
+        ):
+            continue
+        for sentence in re.split(r"(?<=[.!?…])\s+", paragraph):
+            candidate = sentence.strip()
+            if _is_style_candidate(candidate):
+                candidates.append((candidate, paragraph_index))
+    if not candidates:
+        return ()
+
+    selected = [candidates[len(candidates) // 2]]
+    remaining = list(candidates)
+    remaining.remove(selected[0])
+    paragraph_span = max(1, len(paragraphs) - 1)
+
+    while remaining and len(selected) < MAX_STYLE_EXAMPLES:
+        best_index = -1
+        best_score = -1.0
+        for index, (candidate, paragraph_index) in enumerate(remaining):
+            candidate_words = set(re.findall(r"\w+", candidate.casefold()))
+            similarities: list[float] = []
+            position_distances: list[float] = []
+            length_distances: list[float] = []
+            for chosen, chosen_paragraph in selected:
+                chosen_words = set(re.findall(r"\w+", chosen.casefold()))
+                union = candidate_words | chosen_words
+                similarities.append(
+                    len(candidate_words & chosen_words) / len(union) if union else 1.0
+                )
+                position_distances.append(
+                    abs(paragraph_index - chosen_paragraph) / paragraph_span
+                )
+                length_distances.append(
+                    abs(len(candidate) - len(chosen)) / MAX_STYLE_EXAMPLE_CHARACTERS
+                )
+            score = (
+                0.6 * (1.0 - max(similarities))
+                + 0.25 * max(position_distances)
+                + 0.15 * min(1.0, max(length_distances))
+            )
+            if score > best_score:
+                best_index = index
+                best_score = score
+        if best_index < 0:
+            break
+        selected.append(remaining.pop(best_index))
+
+    return tuple(sentence for sentence, _ in selected)
+
+
+def _split_long_paragraph(text: str, limit: int) -> list[str]:
+    sentences = re.split(r"(?<=[.!?…])\s+", text.strip())
+    units: list[str] = []
+    current = ""
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) > limit:
+            if current:
+                units.append(current)
+                current = ""
+            words = sentence.split()
+            segment = ""
+            for word in words:
+                if len(word) > limit:
+                    if segment:
+                        units.append(segment)
+                        segment = ""
+                    for start in range(0, len(word), limit):
+                        units.append(word[start:start + limit])
+                elif len(segment) + len(word) + bool(segment) <= limit:
+                    segment = f"{segment} {word}".strip()
+                else:
+                    units.append(segment)
+                    segment = word
+            if segment:
+                current = segment
+            continue
+        if len(current) + len(sentence) + bool(current) <= limit:
+            current = f"{current} {sentence}".strip()
+        else:
+            if current:
+                units.append(current)
+            current = sentence
+    if current:
+        units.append(current)
+    return units
+
+
+def _conversation_chunks(paragraphs: list[str]) -> list[ConversationChunk]:
+    chunk_limit = MAX_MEMORY_CHUNK_CHARACTERS - 120
+    units: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) <= chunk_limit:
+            units.append(paragraph)
+        else:
+            units.extend(_split_long_paragraph(paragraph, chunk_limit))
+
+    raw_chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if len(current) + len(unit) + 2 <= chunk_limit:
+            current = f"{current}\n\n{unit}" if current else unit
+            continue
+        if current:
+            raw_chunks.append(current)
+        overlap = ""
+        if current:
+            sentences = re.split(r"(?<=[.!?…])\s+", current)
+            overlap = sentences[-1].strip()
+            if len(overlap) > 160:
+                words = overlap.split()
+                overlap = " ".join(words[-20:])
+        current = (
+            f"{overlap}\n\n{unit}"
+            if overlap and len(overlap) + len(unit) + 2 <= chunk_limit
+            else unit
+        )
+    if current:
+        raw_chunks.append(current)
+
+    total = len(raw_chunks)
+    return [
+        ConversationChunk(
+            content=chunk,
+            sequence=index,
+            total=total,
+        )
+        for index, chunk in enumerate(raw_chunks, start=1)
+    ]
 
 
 def _memory_chunks(text: str) -> list[str]:
@@ -631,24 +808,86 @@ def _create_profile(
             )
         )
 
-    memories = answers.get("deep.memory_triggers", "")
-    if conversation_text:
-        memories = f"{memories}\n{conversation_text}".strip()
     embeddings_unavailable = False
-    for chunk in _memory_chunks(memories):
-        vector = None
-        if not embeddings_unavailable:
-            try:
-                vector = embedding_factory(chunk)
-            except Exception as error:
-                embeddings_unavailable = True
-                logger.error(
-                    "Memory embedding failed (error_type=%s); profile will be saved without embeddings",
-                    type(error).__name__,
-                )
-        db.add(TwinMemory(twin_id=profile.id, content=chunk, embedding=vector))
+    model = os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b")
 
-    return profile.id, embeddings_unavailable
+    deep_memory = answers.get("deep.memory_triggers", "").strip()
+    if deep_memory:
+        for chunk in _memory_chunks(deep_memory):
+            vector = None
+            if not embeddings_unavailable:
+                try:
+                    vector = embedding_factory(chunk)
+                except Exception as error:
+                    embeddings_unavailable = True
+                    logger.error(
+                        "Memory embedding failed (error_type=%s); profile will be saved without embeddings",
+                        type(error).__name__,
+                    )
+            db.add(
+                TwinMemory(
+                    twin_id=profile.id,
+                    content=chunk,
+                    embedding=vector,
+                    embedding_model=model if vector is not None else None,
+                    source_type="profile_memory",
+                    source_author="profile",
+                    source_date=None,
+                )
+            )
+
+    if conversation_text:
+        paragraphs = _parse_conversation(conversation_text)
+        chunks = _conversation_chunks(paragraphs)
+        for chunk in chunks:
+            indexed_content = (
+                "Материал предоставлен пользователем как тексты личности; "
+                "фрагмент "
+                f"{chunk.sequence} из {chunk.total}. Внутренние цитаты и пересказы "
+                "не подтверждают авторство, факты или личный опыт.\n"
+                f"{chunk.content}"
+            )
+            vector = None
+            if not embeddings_unavailable:
+                try:
+                    vector = embedding_factory(indexed_content)
+                except Exception as error:
+                    embeddings_unavailable = True
+                    logger.error(
+                        "Conversation embedding failed (error_type=%s); "
+                        "profile will be saved without embeddings",
+                        type(error).__name__,
+                    )
+            db.add(
+                TwinMemory(
+                    twin_id=profile.id,
+                    content=indexed_content,
+                    embedding=vector,
+                    embedding_model=model if vector is not None else None,
+                    source_type="uploaded_material",
+                    source_author="unknown",
+                    source_date=None,
+                )
+            )
+        for example in select_style_examples(conversation_text):
+            db.add(
+                TwinMemory(
+                    twin_id=profile.id,
+                    content=example,
+                    embedding=None,
+                    embedding_model=None,
+                    source_type="style_example",
+                    source_author="unknown",
+                    source_date=None,
+                )
+            )
+
+    if not deep_memory and not conversation_text:
+        return profile.id, embeddings_unavailable
+
+    if not embeddings_unavailable:
+        return profile.id, False
+    return profile.id, True
 
 
 def load_conversation_text(path: str | Path) -> str:
@@ -693,8 +932,17 @@ def save_conversation_draft(user_id: str, text: str) -> OnboardingReply:
         db.commit()
         activated = _activate_profile(db, user_id, onboarding)
     paragraph_count = sum(1 for line in text.splitlines() if line.strip())
+    chunks = _conversation_chunks(_parse_conversation(text))
+    style_example_count = len(select_style_examples(text))
+    format_note = (
+        f"\nТекст разбит на {len(chunks)} перекрывающихся фрагментов в исходном порядке. "
+        "Формат не используется для определения авторов или дат: цитаты и пересказы "
+        "остаются неатрибутированными и не считаются проверенными фактами. "
+        f"Выбрано примеров речевой манеры: {style_example_count}; явные цитаты и "
+        "строки с метками автора исключаются, но авторство остальных примеров не гарантируется."
+    )
     return OnboardingReply(
         f"Обработка TXT завершена: {len(text)} символов, непустых строк: "
-        f"{paragraph_count}.\n\n{activated.text}",
+        f"{paragraph_count}.{format_note}\n\n{activated.text}",
         activated.buttons,
     )

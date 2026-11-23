@@ -43,6 +43,10 @@ class TwinMemory(Base):
     content = Column(Text, nullable=False)
     embedding = Column(Vector(1024))
     trigger_topics = Column(Text)         # JSON-строка, например '["кризис","выбор"]'
+    embedding_model = Column(Text)
+    source_type = Column(Text)
+    source_author = Column(Text)
+    source_date = Column(Text)
     
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
@@ -55,6 +59,22 @@ class ChatMessage(Base):
     crisis_signal = Column(Boolean)
     crisis_score = Column(Integer, nullable=False, default=0, server_default="0")
     crisis_escalated = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutboxMessage(Base):
+    __tablename__ = "outbox"
+    id = Column(Integer, primary_key=True)
+    channel = Column(Text, nullable=False)
+    recipient_id = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)
+    deliver_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(Text, nullable=False, default="pending", server_default="pending")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    claimed_at = Column(DateTime(timezone=True))
+    sent_at = Column(DateTime(timezone=True))
+    last_error = Column(Text)
+    telegram_placeholder_message_id = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
