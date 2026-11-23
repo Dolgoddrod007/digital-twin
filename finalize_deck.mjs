@@ -1,0 +1,5 @@
+import {finalizePresentation} from 'file:///C:/Users/mclovin/.codex/plugins/cache/openai-primary-runtime/presentations/26.1119.11507/skills/presentations/container_tools/artifact_tool_utils.mjs';
+const root='C:/Users/mclovin/Desktop/VKR/digital-twin';
+const skill='C:/Users/mclovin/.codex/plugins/cache/openai-primary-runtime/presentations/26.1119.11507/skills/presentations';
+const result=await finalizePresentation({workspaceDir:root,candidatePath:root+'/presentation_output/digital_twin_overview.pptx',finalPath:root+'/presentation_final/digital_twin_presentation.pptx',pythonExecutable:'C:/Program Files/WindowsApps/OpenAI.CodexPrimaryRuntime.v26-1119-907-0_26.1119.907.0_x64__3k8sg7r9htsxt/dependencies/python/python.exe',integrityValidatorPath:skill+'/container_tools/inspect_presentation_package_integrity.py',layoutValidatorPath:skill+'/container_tools/inspect_presentation_layout_geometry.py',layoutArgs:['--expected-slide-size-emu','12192000,6858000','--validate-heading-fit'],fontPolicy:{basis:'design',families:['Arial']},verifyArtifactToolImport:true,receiptPath:root+'/presentation_output/validation.json'});
+console.log(JSON.stringify(result));

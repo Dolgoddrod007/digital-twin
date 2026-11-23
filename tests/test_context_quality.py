@@ -25,6 +25,7 @@ from services.core.prompt_builder import (
     PROFILE_DATA_START,
     STYLE_DATA_END,
     STYLE_DATA_START,
+    build_system_prompt,
 )
 
 
@@ -265,6 +266,25 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertFalse(any(STYLE_DATA_START in item["content"] for item in messages))
         self.assertTrue(any("Synthetic style sample." in item["content"] for item in messages))
         self.assertTrue(any("не биографические факты" in item["content"] for item in messages))
+
+
+class PromptVoiceTests(unittest.TestCase):
+    def test_identity_disclosure_is_reserved_for_direct_questions(self) -> None:
+        session_context = MagicMock()
+        session = session_context.__enter__.return_value
+        session.get.return_value.name = "Synthetic twin"
+        session.execute.return_value.scalars.return_value.all.return_value = []
+        with patch(
+            "services.core.prompt_builder.SessionLocal",
+            return_value=session_context,
+        ):
+            prompt = build_system_prompt(1)
+
+        self.assertIn("не начинай ответы с шаблонного объяснения", prompt)
+        self.assertIn("если собеседник прямо спрашивает, ты ли это", prompt)
+        self.assertIn("не добавляй без прямого вопроса оговорку о невозможности быть рядом", prompt)
+        self.assertNotIn("Ты не сам этот человек", prompt)
+        self.assertNotIn("У тебя нет собственного сознания", prompt)
 
 
 if __name__ == "__main__":
