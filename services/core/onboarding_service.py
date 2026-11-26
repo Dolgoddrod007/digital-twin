@@ -12,7 +12,7 @@ from db.models import ClientOnboarding, TwinAttribute, TwinMemory, TwinProfile
 from services.core.ollama_client import get_ollama_client
 
 logger = logging.getLogger(__name__)
-CONSENT_VERSION = "messenger-onboarding-2"
+CONSENT_VERSION = "messenger-onboarding-3"
 MAX_CONVERSATION_FILE_BYTES = 20 * 1024 * 1024
 MAX_CONVERSATION_CHARACTERS = 200_000
 MAX_MEMORY_CHUNK_CHARACTERS = 800
@@ -23,11 +23,12 @@ _QUESTIONNAIRE_PATH = Path(__file__).resolve().parents[2] / "config" / "question
 _QUESTIONNAIRE = json.loads(_QUESTIONNAIRE_PATH.read_text(encoding="utf-8"))
 QUESTIONS = _QUESTIONNAIRE["questions"]
 QUESTION_BLOCKS = (
-    (0, 1, "Обращение"),
-    (1, 12, "Манера общения и стиль речи"),
-    (12, 20, "Характер и реакции"),
-    (20, 25, "Окружение и картина мира"),
-    (25, 27, "Фундаментальные вопросы"),
+    (0, frozenset({"subject"}), "Общие сведения и контекст"),
+    (1, frozenset({"style"}), "Манера общения и стиль речи"),
+    (2, frozenset({"character"}), "Характер и реакции"),
+    (3, frozenset({"world", "fundamental"}), "Мировоззрение и ценности"),
+    (4, frozenset({"biography"}), "Биография"),
+    (5, frozenset({"boundaries"}), "Границы диалога"),
 )
 EmbeddingFactory = Callable[[str], list[float]]
 
@@ -42,8 +43,9 @@ GENERAL_CONSENT_TEXT = (
     "Перед началом: вы общаетесь с программной языковой моделью, созданной по профилю, "
     "а не с умершим человеком. Ответы будут отправляться через инфраструктуру VK или "
     "Telegram и сохраняться в базе проекта. Сейчас сообщения и профиль хранятся без "
-    "шифрования. Не указывайте сведения о здоровье, обстоятельствах смерти, кризисах "
-    "или личные данные других людей. Вы можете пропустить необязательный вопрос "
+    "шифрования. В анкете есть необязательный вопрос об общей категории обстоятельств "
+    "смерти; подробности о здоровье, кризисах и личные данные других людей не указывайте. "
+    "Вы можете пропустить необязательный вопрос "
     "или остановить заполнение командой /pause. Согласны продолжить?"
 )
 @dataclass(frozen=True)
@@ -79,8 +81,9 @@ def _store_answers(session: ClientOnboarding, answers: dict[str, str]) -> None:
 
 
 def _question_block(step_index: int) -> tuple[int, str]:
-    for block_number, (start, end, title) in enumerate(QUESTION_BLOCKS, start=1):
-        if start <= step_index < end:
+    question_group = QUESTIONS[step_index]["id"].split(".", 1)[0]
+    for block_number, groups, title in QUESTION_BLOCKS:
+        if question_group in groups:
             return block_number, title
     raise IndexError(f"Question index {step_index} is outside the questionnaire")
 
